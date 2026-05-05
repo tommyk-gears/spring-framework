@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.eclipse.jetty.client.BytesRequestContent;
 import org.eclipse.jetty.client.InputStreamResponseListener;
 import org.eclipse.jetty.client.OutputStreamRequestContent;
 import org.eclipse.jetty.client.Request;
@@ -69,6 +70,11 @@ class JettyClientHttpRequest extends AbstractStreamingClientHttpRequest {
 	}
 
 	@Override
+	public void setBody(byte[] body) throws IOException {
+		setBody(new ByteArrayBody(body));
+	}
+
+	@Override
 	protected ClientHttpResponse executeInternal(HttpHeaders headers, @Nullable Body body) throws IOException {
 		if (!headers.isEmpty()) {
 			this.request.headers(httpFields -> {
@@ -86,12 +92,22 @@ class JettyClientHttpRequest extends AbstractStreamingClientHttpRequest {
 		try {
 			InputStreamResponseListener responseListener = new InputStreamResponseListener();
 			if (body != null) {
-				OutputStreamRequestContent requestContent = new OutputStreamRequestContent(contentType);
-				this.request.body(requestContent)
-						.send(responseListener);
-				try (OutputStream outputStream =
-							new BufferedOutputStream(requestContent.getOutputStream(), CHUNK_SIZE)) {
-					body.writeTo(StreamUtils.nonClosing(outputStream));
+				if (body instanceof ByteArrayBody byteArrayBody) {
+					/*
+					OutputStreamRequestContent adds the overhead of an extra final data frame over http2,
+					hence we avoid using it if we already have the body available in a byte array.
+					 */
+					BytesRequestContent requestContent = new BytesRequestContent(contentType, byteArrayBody.body());
+					this.request.body(requestContent)
+							.send(responseListener);
+				} else {
+					OutputStreamRequestContent requestContent = new OutputStreamRequestContent(contentType);
+					this.request.body(requestContent)
+							.send(responseListener);
+					try (OutputStream outputStream =
+								new BufferedOutputStream(requestContent.getOutputStream(), CHUNK_SIZE)) {
+						body.writeTo(StreamUtils.nonClosing(outputStream));
+					}
 				}
 			}
 			else {
@@ -123,6 +139,19 @@ class JettyClientHttpRequest extends AbstractStreamingClientHttpRequest {
 		}
 		catch (TimeoutException ex) {
 			throw new IOException("Request timed out: " + ex.getMessage(), ex);
+		}
+	}
+
+	private record ByteArrayBody(byte[] body) implements Body {
+
+		@Override
+		public void writeTo(OutputStream outputStream) throws IOException {
+			StreamUtils.copy(body, outputStream);
+		}
+
+		@Override
+		public boolean repeatable() {
+			return true;
 		}
 	}
 }
